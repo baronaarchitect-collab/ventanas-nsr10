@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ventanería NSR-10 · Detector IFC</title>
+    <link rel="stylesheet" href="./src/style.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
+          "web-ifc": "https://unpkg.com/web-ifc@0.0.68/web-ifc-api.js"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="panel">
+        <header>
+          <h1>Ventanería <span>NSR-10</span></h1>
+          <p class="tag">Detección de ventanas en IFC + verificación de vidrio</p>
+        </header>
+
+        <section class="block">
+          <label class="filebtn">
+            <input type="file" id="file" accept=".ifc" hidden />
+            📂 Cargar modelo IFC
+          </label>
+          <div id="status" class="status">Inicializando…</div>
+        </section>
+
+        <section class="block">
+          <h2>Parámetros del proyecto</h2>
+
+          <label class="field">
+            <span>Altura de instalación (m)</span>
+            <input type="number" id="altura" value="20" min="0" step="1" />
+          </label>
+
+          <label class="field">
+            <span>Ciudad / Región</span>
+            <select id="ciudad"></select>
+          </label>
+
+          <div class="field">
+            <span>Tipo de vidrio</span>
+            <div class="radios">
+              <label><input type="radio" name="tipo" id="tipo-lam" checked /> Laminado</label>
+              <label><input type="radio" name="tipo" id="tipo-mono" /> Monolítico</label>
+            </div>
+          </div>
+
+          <label class="field">
+            <span>Factor de vidrio (% del vano)</span>
+            <input type="number" id="factor" value="90" min="10" max="100" step="1" />
+          </label>
+
+          <label class="field">
+            <span>Ancho máx. de nave (m)</span>
+            <input type="number" id="nave" value="1.5" min="0.3" step="0.1" />
+          </label>
+
+          <button id="btn-calcular" class="primary" disabled>Detectar y calcular</button>
+        </section>
+
+        <section class="block grow">
+          <h2>Resultados por tipo <span class="hint">(click = ver en 3D)</span></h2>
+          <div id="tabla" class="tabla"></div>
+        </section>
+
+        <section class="block export">
+          <button id="btn-html" disabled>📄 Informe (PDF)</button>
+          <button id="btn-csv" disabled>⤓ CSV</button>
+        </section>
+      </aside>
+
+      <main id="viewport"></main>
+    </div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>
