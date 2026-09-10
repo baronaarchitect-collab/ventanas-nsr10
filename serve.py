@@ -10,6 +10,7 @@ import http.server
 import socketserver
 import webbrowser
 import os
+import sys
 
 # Servir siempre la carpeta de este script, sin importar desde dónde se lance.
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -39,8 +40,9 @@ if __name__ == "__main__":
     with Server(("", PORT), Handler) as httpd:
         url = f"http://localhost:{PORT}/"
         print(f"Servidor en {url}  (Ctrl+C para detener)")
-        try:
-            webbrowser.open(url)
-        except Exception:
-            pass
+        if "--no-open" not in sys.argv:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
         httpd.serve_forever()

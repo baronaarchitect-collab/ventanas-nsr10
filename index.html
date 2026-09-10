@@ -8,12 +8,23 @@
     <script type="importmap">
       {
         "imports": {
-          "three": "https://unpkg.com/three@0.169.0/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.169.0/examples/jsm/",
-          "web-ifc": "https://unpkg.com/web-ifc@0.0.68/web-ifc-api.js"
+          "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/",
+          "web-ifc": "https://cdn.jsdelivr.net/npm/web-ifc@0.0.68/web-ifc-api.js"
         }
       }
     </script>
+    <!-- Precarga en paralelo: evita la cascada index → main.js → viewer.js → three / web-ifc / wasm -->
+    <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js" />
+    <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/controls/OrbitControls.js" />
+    <link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/web-ifc@0.0.68/web-ifc-api.js" />
+    <link rel="preload" href="https://cdn.jsdelivr.net/npm/web-ifc@0.0.68/web-ifc.wasm" as="fetch" type="application/wasm" crossorigin="anonymous" />
+    <link rel="modulepreload" href="./src/viewer.js" />
+    <link rel="modulepreload" href="./src/ifc-windows.js" />
+    <link rel="modulepreload" href="./src/ifc-grids.js" />
+    <link rel="modulepreload" href="./src/calculo.js" />
+    <link rel="modulepreload" href="./src/nsr10.js" />
+    <link rel="modulepreload" href="./src/report.js" />
   </head>
   <body>
     <div id="app">
@@ -31,41 +42,46 @@
           <div id="status" class="status">Inicializando…</div>
         </section>
 
-        <section class="block">
-          <h2>Parámetros del proyecto</h2>
+        <section class="block params" id="params">
+          <h2 title="Clic para plegar / desplegar">
+            Parámetros del proyecto <span class="chev">▾</span>
+          </h2>
+          <div class="params-body">
+            <label class="field">
+              <span>Altura de instalación (m)</span>
+              <input type="number" id="altura" value="20" min="0" step="1" />
+            </label>
 
-          <label class="field">
-            <span>Altura de instalación (m)</span>
-            <input type="number" id="altura" value="20" min="0" step="1" />
-          </label>
+            <label class="field">
+              <span>Ciudad / Región</span>
+              <select id="ciudad"></select>
+            </label>
 
-          <label class="field">
-            <span>Ciudad / Región</span>
-            <select id="ciudad"></select>
-          </label>
-
-          <div class="field">
-            <span>Tipo de vidrio</span>
-            <div class="radios">
-              <label><input type="radio" name="tipo" id="tipo-lam" checked /> Laminado</label>
-              <label><input type="radio" name="tipo" id="tipo-mono" /> Monolítico</label>
+            <div class="field">
+              <span>Tipo de vidrio</span>
+              <div class="radios">
+                <label><input type="radio" name="tipo" id="tipo-lam" checked /> Laminado</label>
+                <label><input type="radio" name="tipo" id="tipo-mono" /> Monolítico</label>
+              </div>
             </div>
+
+            <label class="field">
+              <span>Factor de vidrio (% del vano)</span>
+              <input type="number" id="factor" value="90" min="10" max="100" step="1" />
+            </label>
+
+            <label class="field">
+              <span>Ancho máx. de nave (m)</span>
+              <input type="number" id="nave" value="1.5" min="0.3" step="0.1" />
+            </label>
+
+            <button id="btn-calcular" class="primary" disabled>Detectar y calcular</button>
           </div>
-
-          <label class="field">
-            <span>Factor de vidrio (% del vano)</span>
-            <input type="number" id="factor" value="90" min="10" max="100" step="1" />
-          </label>
-
-          <label class="field">
-            <span>Ancho máx. de nave (m)</span>
-            <input type="number" id="nave" value="1.5" min="0.3" step="0.1" />
-          </label>
-
-          <button id="btn-calcular" class="primary" disabled>Detectar y calcular</button>
         </section>
 
-        <section class="block grow">
+        <div id="hsplit" class="hsplit" title="Arrastre para dar más espacio a los resultados · doble clic: restablecer"><span></span></div>
+
+        <section class="block grow results">
           <h2>Resultados por tipo <span class="hint">(click = ver en 3D)</span></h2>
           <div id="tabla" class="tabla"></div>
         </section>
@@ -75,6 +91,8 @@
           <button id="btn-csv" disabled>⤓ CSV</button>
         </section>
       </aside>
+
+      <div id="vsplit" class="vsplit" title="Arrastre para cambiar el ancho del panel · doble clic: restablecer"></div>
 
       <main id="viewport"></main>
     </div>

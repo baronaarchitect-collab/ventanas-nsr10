@@ -4,7 +4,11 @@ App externa (navegador) que **carga un modelo IFC**, **detecta las ventanas** y 
 **espesor de vidrio** según la **NSR-10, Título K.4** (vidrio y ventanería), a partir del área
 de la hoja, la presión de viento (por ciudad y altura) y el tipo de vidrio.
 
-## Cómo ejecutar
+## Versión en línea
+
+**https://baronaarchitect-collab.github.io/ventanas-nsr10/** (GitHub Pages; se redespliega solo con cada `push` a `main`).
+
+## Cómo ejecutar en local
 
 No requiere instalar dependencias (three.js y web-ifc se cargan desde CDN). Solo necesita
 un servidor local porque los módulos ES no funcionan con `file://`.
@@ -34,6 +38,29 @@ y abra `http://localhost:5174`.
 4. Click en una fila → resalta esas ventanas en el 3D.
 5. Exportar **Informe (PDF)** o **CSV**.
 
+### Interfaz
+
+- El **panel lateral se ensancha** arrastrando el borde que lo separa del visor (doble clic: restablecer).
+- El **divisor sobre "Resultados por tipo"** reparte la altura entre parámetros y resultados; el título
+  *Parámetros del proyecto* se pliega con un clic. Ancho y estado se recuerdan en el navegador.
+
+### Informe
+
+- Encabezado y cabecera de la tabla **fijos** al hacer scroll; botón *Imprimir / PDF*.
+- Clic en cualquier imagen 3D para **ampliarla** (Esc o clic fuera para cerrar).
+- Botón **🎯 Ver en modelo** por fila (y *Ver todas*): resalta y encuadra esas ventanas en el visor
+  de la app (el informe se comunica con la app mediante `postMessage`; requiere que se haya abierto
+  desde ella, no como archivo suelto).
+
+## Rendimiento
+
+- La geometría de cada elemento IFC se **fusiona en 1–2 mallas** con color por vértice y materiales
+  compartidos (en lugar de una malla y un material por pieza): muchísimos menos *draw calls*.
+- El visor **solo renderiza cuando algo cambia** (cámara, selección, carga), no 60 veces por segundo.
+- La construcción del modelo se hace **por lotes** con indicador de progreso para no congelar la interfaz.
+- Las vistas del informe se capturan **en lote**, en JPEG y a pixel ratio 1 (antes PNG a 2×).
+- Librerías desde **jsdelivr** con `modulepreload` y precarga del `.wasm` de web-ifc.
+
 ## Lógica de cálculo (NSR-10 K.4)
 
 1. La **presión de viento** se interpola por altura de instalación y ciudad
@@ -55,7 +82,7 @@ y abra `http://localhost:5174`.
 
 ```
 index.html          import-map (three + web-ifc por CDN) + interfaz
-serve.py            servidor estático local (MIME correctos para .js/.wasm)
+serve.py            servidor estático local (MIME correctos para .js/.wasm); --no-open no abre navegador
 iniciar.bat         lanzador
 src/
   viewer.js         visor 3D (web-ifc + three.js), selección multiselección

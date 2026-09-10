@@ -1,13 +1,18 @@
 /**
  * Visor 3D de IFC basado en web-ifc + three.js.
- * - Carga un archivo IFC (Uint8Array).
- * - Genera la geometría y la agrupa por elemento (expressID).
- * - Permite selección por click (con resaltado) y multiselección con Ctrl/Shift.
+ * - Carga un archivo IFC (Uint8Array) por lotes (la interfaz no se congela y muestra progreso).
+ * - Fusiona toda la geometría de cada elemento en 1–2 mallas (opaca / transparente) con
+ *   colores por vértice: muchísimas menos draw calls y materiales que una malla por pieza.
+ * - Renderiza solo cuando algo cambia (cámara, selección, carga), no 60 veces por segundo.
+ * - Selección por click (resaltado) y multiselección con Ctrl/Shift.
+ * - Captura de vistas por lotes para el informe (tamaño y modo fantasma configurados una sola vez).
  */
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import * as WebIFC from "web-ifc";
 import { construirEjes } from "./ifc-grids.js";
+
+const yieldUI = () => new Promise((r) => setTimeout(r, 0));
 
 export class IfcViewer {
   constructor(container) {
@@ -22,8 +27,8 @@ export class IfcViewer {
     this.elementos = new Map(); // expressID -> { expressID, meshes[], bbox }
     this.allMeshes = [];
     this.selected = new Set();
-    this.originalMats = new Map();
     this.listeners = [];
+    this.needsRender = true;
 
     const w = container.clientWidth || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
@@ -31,7 +36,8 @@ export class IfcViewer {
     this.camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 5000);
     this.camera.position.set(20, 20, 20);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+    // Sin preserveDrawingBuffer: la captura se hace en el mismo tick que el render.
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.setClearColor(0x1a1d21);
@@ -39,6 +45,7 @@ export class IfcViewer {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.controls.addEventListener("change", () => (this.needsRender = true));
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 0.7));
     const dir = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -50,11 +57,27 @@ export class IfcViewer {
 
     this.scene.add(new THREE.GridHelper(100, 50, 0x444444, 0x2a2d31));
 
+    // Materiales compartidos por TODO el modelo (el color va por vértice).
+    this.matOpaco = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      side: THREE.DoubleSide,
+      metalness: 0.05,
+      roughness: 0.75,
+    });
+    this.matTransp = new THREE.MeshStandardMaterial({
+      vertexColors: true,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      metalness: 0.05,
+      roughness: 0.75,
+    });
     this.highlightMat = new THREE.MeshStandardMaterial({
       color: 0xff6a00,
       emissive: 0x552200,
       metalness: 0.1,
       roughness: 0.6,
+      side: THREE.DoubleSide,
     });
 
     // web-ifc entrega la geometría ya en Y-up (convención three.js): no se rota.
@@ -74,59 +97,62 @@ export class IfcViewer {
     this.listeners.push(fn);
   }
 
+  invalidate() {
+    this.needsRender = true;
+  }
+
   async init(wasmPath) {
     this.ifcAPI.SetWasmPath(wasmPath, true);
     await this.ifcAPI.Init();
   }
 
-  async loadIFC(data) {
+  /**
+   * Carga el IFC. onProgress(fase, hecho, total) permite mostrar avance.
+   */
+  async loadIFC(data, onProgress = () => {}) {
     this.clear();
+    onProgress("parse", 0, 1);
+    await yieldUI();
     this.modelID = this.ifcAPI.OpenModel(data, { COORDINATE_TO_ORIGIN: true });
 
-    const self = this;
-    this.ifcAPI.StreamAllMeshes(this.modelID, (flatMesh) => {
-      const expressID = flatMesh.expressID;
+    // 1) Teselación (web-ifc, síncrona). Los vértices se copian aquí mismo porque web-ifc
+    //    libera la geometría de cada malla al terminar su callback.
+    onProgress("tessellate", 0, 1);
+    await yieldUI();
+    const pendientes = [];
+    const api = this.ifcAPI;
+    const modelID = this.modelID;
+    api.StreamAllMeshes(modelID, (flatMesh) => {
       const geometries = flatMesh.geometries;
-      const meshesForElement = [];
-      const bbox = new THREE.Box3();
-
-      for (let i = 0; i < geometries.size(); i++) {
+      const n = geometries.size();
+      const partes = [];
+      for (let i = 0; i < n; i++) {
         const placed = geometries.get(i);
-        const geom = self.ifcAPI.GetGeometry(self.modelID, placed.geometryExpressID);
-        const verts = self.ifcAPI.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
-        const indices = self.ifcAPI.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
-
-        const bufferGeom = self.buildGeometry(verts, indices);
-        const matrix = new THREE.Matrix4();
-        matrix.fromArray(placed.flatTransformation);
-
-        const c = placed.color;
-        const material = new THREE.MeshStandardMaterial({
-          color: new THREE.Color(c.x, c.y, c.z),
-          transparent: c.w < 1,
-          opacity: c.w,
-          side: THREE.DoubleSide,
-          metalness: 0.05,
-          roughness: 0.75,
-        });
-
-        const mesh = new THREE.Mesh(bufferGeom, material);
-        mesh.applyMatrix4(matrix);
-        mesh.userData.expressID = expressID;
-        meshesForElement.push(mesh);
-        self.root.add(mesh);
-        self.allMeshes.push(mesh);
-
-        bufferGeom.computeBoundingBox();
-        bbox.union(bufferGeom.boundingBox.clone().applyMatrix4(matrix));
-
+        const geom = api.GetGeometry(modelID, placed.geometryExpressID);
+        const verts = api.GetVertexArray(geom.GetVertexData(), geom.GetVertexDataSize());
+        const indices = api.GetIndexArray(geom.GetIndexData(), geom.GetIndexDataSize());
         geom.delete();
+        if (verts.length && indices.length)
+          partes.push({ verts, indices, m: placed.flatTransformation, color: placed.color });
       }
-
-      self.elementos.set(expressID, { expressID, meshes: meshesForElement, bbox });
+      if (partes.length) pendientes.push({ expressID: flatMesh.expressID, partes });
     });
 
-    // Ejes / grillas del IFC
+    // 2) Construcción de mallas three.js por lotes, cediendo el hilo para pintar progreso.
+    const total = pendientes.length;
+    const LOTE = 150;
+    for (let k = 0; k < total; k += LOTE) {
+      const fin = Math.min(k + LOTE, total);
+      for (let j = k; j < fin; j++) {
+        this.construirElemento(pendientes[j]);
+        pendientes[j] = null; // liberar las copias de vértices cuanto antes
+      }
+      onProgress("build", fin, total);
+      this.needsRender = true;
+      await yieldUI();
+    }
+
+    // 3) Ejes / grillas del IFC
     try {
       const ejes = construirEjes(this.ifcAPI, this.modelID);
       if (ejes) this.addGrid(ejes);
@@ -137,26 +163,109 @@ export class IfcViewer {
     }
 
     this.fitToModel();
+    onProgress("done", total, total);
     return this.modelID;
   }
 
-  buildGeometry(verts, indices) {
-    // web-ifc entrega 6 floats por vértice: [px,py,pz, nx,ny,nz]
-    const posCount = verts.length / 6;
-    const positions = new Float32Array(posCount * 3);
-    const normals = new Float32Array(posCount * 3);
-    for (let i = 0; i < posCount; i++) {
-      positions[i * 3] = verts[i * 6];
-      positions[i * 3 + 1] = verts[i * 6 + 1];
-      positions[i * 3 + 2] = verts[i * 6 + 2];
-      normals[i * 3] = verts[i * 6 + 3];
-      normals[i * 3 + 1] = verts[i * 6 + 4];
-      normals[i * 3 + 2] = verts[i * 6 + 5];
+  /** Fusiona todas las piezas de un elemento en 1 malla opaca y/o 1 transparente. */
+  construirElemento({ expressID, partes }) {
+    const grupos = { op: [], tr: [] };
+    const bbox = new THREE.Box3();
+
+    for (const parte of partes) (parte.color.w < 1 ? grupos.tr : grupos.op).push(parte);
+
+    const meshes = [];
+    for (const [key, lista] of Object.entries(grupos)) {
+      if (!lista.length) continue;
+      const g = this.fusionar(lista, bbox);
+      const mesh = new THREE.Mesh(g, key === "tr" ? this.matTransp : this.matOpaco);
+      mesh.userData.expressID = expressID;
+      mesh.userData.baseMat = mesh.material;
+      mesh.matrixAutoUpdate = false;
+      meshes.push(mesh);
+      this.root.add(mesh);
+      this.allMeshes.push(mesh);
     }
+    if (meshes.length) this.elementos.set(expressID, { expressID, meshes, bbox });
+  }
+
+  /**
+   * Une varias piezas (6 floats/vértice: px,py,pz,nx,ny,nz) aplicando su matriz en CPU y
+   * escribiendo color RGBA por vértice. Amplía bbox con los vértices transformados.
+   */
+  fusionar(lista, bbox) {
+    let nV = 0;
+    let nI = 0;
+    for (const p of lista) {
+      nV += p.verts.length / 6;
+      nI += p.indices.length;
+    }
+    const pos = new Float32Array(nV * 3);
+    const nor = new Float32Array(nV * 3);
+    const col = new Float32Array(nV * 4);
+    const idx = nV > 65535 ? new Uint32Array(nI) : new Uint16Array(nI);
+
+    let vo = 0; // offset de vértice
+    let io = 0; // offset de índice
+    const nm = new THREE.Matrix3();
+    const m4 = new THREE.Matrix4();
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (const p of lista) {
+      const e = p.m;
+      m4.fromArray(e);
+      nm.getNormalMatrix(m4);
+      const n = nm.elements;
+      const { verts, indices } = p;
+      const cnt = verts.length / 6;
+      const r = p.color.x, gc = p.color.y, b = p.color.z, a = p.color.w;
+
+      for (let i = 0; i < cnt; i++) {
+        const s = i * 6;
+        const x = verts[s], y = verts[s + 1], z = verts[s + 2];
+        const px = e[0] * x + e[4] * y + e[8] * z + e[12];
+        const py = e[1] * x + e[5] * y + e[9] * z + e[13];
+        const pz = e[2] * x + e[6] * y + e[10] * z + e[14];
+        const d = (vo + i) * 3;
+        pos[d] = px; pos[d + 1] = py; pos[d + 2] = pz;
+        if (px < minX) minX = px;
+        if (px > maxX) maxX = px;
+        if (py < minY) minY = py;
+        if (py > maxY) maxY = py;
+        if (pz < minZ) minZ = pz;
+        if (pz > maxZ) maxZ = pz;
+
+        const nx = verts[s + 3], ny = verts[s + 4], nz = verts[s + 5];
+        const ox = n[0] * nx + n[3] * ny + n[6] * nz;
+        const oy = n[1] * nx + n[4] * ny + n[7] * nz;
+        const oz = n[2] * nx + n[5] * ny + n[8] * nz;
+        const len = Math.hypot(ox, oy, oz) || 1;
+        nor[d] = ox / len; nor[d + 1] = oy / len; nor[d + 2] = oz / len;
+
+        const c = (vo + i) * 4;
+        col[c] = r; col[c + 1] = gc; col[c + 2] = b; col[c + 3] = a;
+      }
+      for (let i = 0; i < indices.length; i++) idx[io + i] = indices[i] + vo;
+      vo += cnt;
+      io += indices.length;
+    }
+
+    if (nV > 0) {
+      bbox.min.set(Math.min(bbox.min.x, minX), Math.min(bbox.min.y, minY), Math.min(bbox.min.z, minZ));
+      bbox.max.set(Math.max(bbox.max.x, maxX), Math.max(bbox.max.y, maxY), Math.max(bbox.max.z, maxZ));
+    }
+
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-    g.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-    g.setIndex(new THREE.BufferAttribute(indices, 1));
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    g.setAttribute("normal", new THREE.BufferAttribute(nor, 3));
+    g.setAttribute("color", new THREE.BufferAttribute(col, 4));
+    g.setIndex(new THREE.BufferAttribute(idx, 1));
+    g.boundingBox = new THREE.Box3(
+      new THREE.Vector3(minX, minY, minZ),
+      new THREE.Vector3(maxX, maxY, maxZ)
+    );
+    g.boundingSphere = g.boundingBox.getBoundingSphere(new THREE.Sphere());
     return g;
   }
 
@@ -187,20 +296,16 @@ export class IfcViewer {
     const el = this.elementos.get(expressID);
     if (!el || this.selected.has(expressID)) return;
     this.selected.add(expressID);
-    for (const m of el.meshes) {
-      if (!this.originalMats.has(m.id)) this.originalMats.set(m.id, m.material);
-      m.material = this.highlightMat;
-    }
+    for (const m of el.meshes) m.material = this.highlightMat;
+    this.needsRender = true;
   }
 
   deselect(expressID) {
     const el = this.elementos.get(expressID);
     if (!el) return;
     this.selected.delete(expressID);
-    for (const m of el.meshes) {
-      const orig = this.originalMats.get(m.id);
-      if (orig) m.material = orig;
-    }
+    for (const m of el.meshes) m.material = m.userData.baseMat;
+    this.needsRender = true;
   }
 
   clearSelection(emit = true) {
@@ -226,23 +331,29 @@ export class IfcViewer {
       const visible = set ? set.has(id) : true;
       for (const m of el.meshes) m.visible = visible;
     }
+    this.needsRender = true;
   }
 
   addOverlay(obj) {
     this.overlay.add(obj);
+    this.needsRender = true;
   }
   clearOverlay() {
     this.overlay.clear();
+    this.needsRender = true;
   }
 
   addGrid(obj) {
     this.grids.add(obj);
+    this.needsRender = true;
   }
   clearGrids() {
     this.grids.clear();
+    this.needsRender = true;
   }
   setGridsVisible(v) {
     this.grids.visible = v;
+    this.needsRender = true;
   }
 
   // --- Encuadre de cámara ---------------------------------------------------
@@ -251,12 +362,15 @@ export class IfcViewer {
     const box = new THREE.Box3();
     for (const id of ids) {
       const el = this.elementos.get(id);
-      if (el && !el.bbox.isEmpty()) {
-        // bbox está en espacio de modelo (Z-up); convertir al mundo aplicando la rotación del root
-        const b = el.bbox.clone().applyMatrix4(this.root.matrixWorld);
-        box.union(b);
-      }
+      if (el && !el.bbox.isEmpty()) box.union(el.bbox);
     }
+    return box;
+  }
+
+  /** Caja del modelo completo (unión de bboxes precalculados: no recorre vértices). */
+  boxModelo() {
+    const box = new THREE.Box3();
+    for (const [, el] of this.elementos) if (!el.bbox.isEmpty()) box.union(el.bbox);
     return box;
   }
 
@@ -279,6 +393,7 @@ export class IfcViewer {
     this.camera.far = maxDim * 100 + 1000;
     this.camera.updateProjectionMatrix();
     this.controls.update();
+    this.needsRender = true;
   }
 
   frameObjects(ids, vista = "iso", pad = 1.4) {
@@ -286,74 +401,107 @@ export class IfcViewer {
   }
 
   // --- Captura de imagen ----------------------------------------------------
-  /** Renderiza y devuelve un dataURL PNG del estado actual. */
-  captureImage(width = 1400, height = 900) {
-    const oldW = this.renderer.domElement.width;
-    const oldH = this.renderer.domElement.height;
-    const oldAspect = this.camera.aspect;
+  /**
+   * Captura una serie de vistas en un solo lote (para el informe).
+   * grupos: [{ ids: number[]|null, ghost: bool, vista: 'iso'|'top', pad }]
+   * Devuelve un array de dataURL (mismo orden). Es asíncrona y llama onProgress(i, n).
+   */
+  async captureLote(
+    grupos,
+    { width = 1000, height = 650, format = "image/jpeg", quality = 0.82, onProgress = () => {} } = {}
+  ) {
+    const canvas = this.renderer.domElement;
+    const prev = {
+      w: canvas.clientWidth,
+      h: canvas.clientHeight,
+      pr: this.renderer.getPixelRatio(),
+      pos: this.camera.position.clone(),
+      target: this.controls.target.clone(),
+      up: this.camera.up.clone(),
+      aspect: this.camera.aspect,
+      vis: this.allMeshes.map((m) => m.visible),
+    };
+
+    this.renderer.setPixelRatio(1);
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.renderer.render(this.scene, this.camera);
-    const url = this.renderer.domElement.toDataURL("image/png");
-    this.renderer.setSize(oldW, oldH, false);
-    this.camera.aspect = oldAspect;
-    this.camera.updateProjectionMatrix();
-    return url;
+
+    const ghost = this.ghostMat();
+    let enGhost = false;
+    const setGhostAll = () => {
+      for (const m of this.allMeshes) {
+        m.visible = true;
+        m.material = ghost;
+      }
+      enGhost = true;
+    };
+    const setBaseAll = () => {
+      for (const m of this.allMeshes) {
+        m.visible = true;
+        m.material = m.userData.baseMat;
+      }
+      enGhost = false;
+    };
+    const setBase = (ids) => {
+      for (const id of ids) {
+        const el = this.elementos.get(id);
+        if (el) for (const m of el.meshes) m.material = m.userData.baseMat;
+      }
+    };
+    const setGhost = (ids) => {
+      for (const id of ids) {
+        const el = this.elementos.get(id);
+        if (el) for (const m of el.meshes) m.material = ghost;
+      }
+    };
+
+    const salida = [];
+    try {
+      for (let i = 0; i < grupos.length; i++) {
+        const g = grupos[i];
+        const vista = g.vista ?? "iso";
+        const pad = g.pad ?? 1.4;
+        if (!g.ids) {
+          if (enGhost) setBaseAll();
+          this.frameBox(this.boxModelo(), vista, pad);
+        } else if (g.ghost) {
+          if (!enGhost) setGhostAll();
+          setBase(g.ids);
+          this.frameObjects(g.ids, vista, pad);
+        } else {
+          if (enGhost) setBaseAll();
+          this.isolate(g.ids);
+          this.frameObjects(g.ids, vista, pad);
+        }
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+        salida.push(canvas.toDataURL(format, quality));
+        if (g.ids && g.ghost) setGhost(g.ids);
+        onProgress(i + 1, grupos.length);
+        await yieldUI();
+      }
+    } finally {
+      // restaurar materiales (respetando selección), visibilidad, cámara y tamaño
+      for (const m of this.allMeshes) {
+        m.material = this.selected.has(m.userData.expressID) ? this.highlightMat : m.userData.baseMat;
+      }
+      this.allMeshes.forEach((m, i) => (m.visible = prev.vis[i] ?? true));
+      this.camera.position.copy(prev.pos);
+      this.controls.target.copy(prev.target);
+      this.camera.up.copy(prev.up);
+      this.camera.aspect = prev.aspect;
+      this.camera.updateProjectionMatrix();
+      this.renderer.setPixelRatio(prev.pr);
+      this.renderer.setSize(prev.w, prev.h, false);
+      this.controls.update();
+      this.needsRender = true;
+    }
+    return salida;
   }
 
-  /**
-   * Aísla los ids indicados (o muestra todo si null), encuadra y captura.
-   * Restaura visibilidad y cámara al terminar.
-   */
-  captureVista(ids, vista = "iso", { width = 1400, height = 900, pad = 1.4, ghost = false } = {}) {
-    // guardar estado
-    const prevVis = new Map();
-    for (const [id, el] of this.elementos) prevVis.set(id, el.meshes.map((m) => m.visible));
-    const prevPos = this.camera.position.clone();
-    const prevTarget = this.controls.target.clone();
-    const prevUp = this.camera.up.clone();
-    const prevAspect = this.camera.aspect;
-
-    if (ids) {
-      const set = new Set(ids);
-      for (const [id, el] of this.elementos) {
-        const vis = set.has(id);
-        for (const m of el.meshes) {
-          if (ghost && !vis) {
-            m.visible = true;
-            m.userData._prevMat = m.material;
-            m.material = this.ghostMat();
-          } else {
-            m.visible = vis;
-          }
-        }
-      }
-      this.frameObjects(ids, vista, pad);
-    } else {
-      for (const [, el] of this.elementos) for (const m of el.meshes) m.visible = true;
-      this.frameBox(new THREE.Box3().setFromObject(this.root), vista, pad);
-    }
-
-    const url = this.captureImage(width, height);
-
-    // restaurar
-    for (const [id, el] of this.elementos) {
-      const vis = prevVis.get(id);
-      el.meshes.forEach((m, i) => {
-        if (m.userData._prevMat) {
-          m.material = m.userData._prevMat;
-          delete m.userData._prevMat;
-        }
-        m.visible = vis ? vis[i] : true;
-      });
-    }
-    this.camera.position.copy(prevPos);
-    this.controls.target.copy(prevTarget);
-    this.camera.up.copy(prevUp);
-    this.camera.aspect = prevAspect;
-    this.camera.updateProjectionMatrix();
-    this.controls.update();
+  /** Compatibilidad: una sola vista (usa captureLote). */
+  async captureVista(ids, vista = "iso", { width = 1000, height = 650, pad = 1.4, ghost = false } = {}) {
+    const [url] = await this.captureLote([{ ids, vista, pad, ghost }], { width, height });
     return url;
   }
 
@@ -377,7 +525,6 @@ export class IfcViewer {
     this.allMeshes = [];
     this.elementos.clear();
     this.selected.clear();
-    this.originalMats.clear();
     this.clearOverlay();
     this.clearGrids();
     if (this.modelID >= 0) {
@@ -388,10 +535,11 @@ export class IfcViewer {
       }
       this.modelID = -1;
     }
+    this.needsRender = true;
   }
 
   fitToModel() {
-    const box = new THREE.Box3().setFromObject(this.root);
+    const box = this.boxModelo();
     if (box.isEmpty()) return;
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
@@ -403,19 +551,25 @@ export class IfcViewer {
     this.camera.far = maxDim * 100;
     this.camera.updateProjectionMatrix();
     this.controls.update();
+    this.needsRender = true;
   }
 
   onResize() {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
+    if (!w || !h) return;
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.needsRender = true;
   }
 
   animate() {
     requestAnimationFrame(this.animate);
-    this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+    const moved = this.controls.update();
+    if (moved || this.needsRender) {
+      this.needsRender = false;
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 }

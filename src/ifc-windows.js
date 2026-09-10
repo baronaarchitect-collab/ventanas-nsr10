@@ -35,17 +35,23 @@ export function escalaLongitud(api, modelID) {
 /** Mapa expressID(elemento) -> nombre de tipo, usando IfcRelDefinesByType. */
 function mapaTipos(api, modelID) {
   const map = new Map();
+  const nombres = new Map(); // id de tipo -> nombre (cada tipo se lee una sola vez)
   try {
     const rels = api.GetLineIDsWithType(modelID, WebIFC.IFCRELDEFINESBYTYPE);
     for (let i = 0; i < rels.size(); i++) {
       const rel = api.GetLine(modelID, rels.get(i));
       if (!rel.RelatingType) continue;
-      let typeName = "Tipo";
-      try {
-        const t = api.GetLine(modelID, rel.RelatingType.value);
-        typeName = t.Name?.value ?? t.ObjectType?.value ?? "Tipo";
-      } catch (e) {
-        /* noop */
+      const tid = rel.RelatingType.value;
+      let typeName = nombres.get(tid);
+      if (typeName === undefined) {
+        typeName = "Tipo";
+        try {
+          const t = api.GetLine(modelID, tid);
+          typeName = t.Name?.value ?? t.ObjectType?.value ?? "Tipo";
+        } catch (e) {
+          /* noop */
+        }
+        nombres.set(tid, typeName);
       }
       const related = rel.RelatedObjects ?? [];
       for (const r of related) {

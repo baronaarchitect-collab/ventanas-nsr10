@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ventanas-nsr10",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["serve.py", "--no-open"],
+      "port": 5174
+    }
+  ]
+}
