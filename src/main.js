@@ -181,33 +181,46 @@ function ventanasDeResultado(r) {
 async function capturarVistas(onProgress) {
   const todas = ventanas().map((v) => v.expressID);
   const imagenes = { porTipo: {} };
+  const conMiniaturas = $("chk-mini").checked;
   try {
     const generales = [{ ids: null }];
     if (todas.length) generales.push({ ids: todas, ghost: true });
     const porTipo = [];
-    resultados.forEach((r, i) => {
-      const ids = ventanasDeResultado(r);
-      if (ids.length) porTipo.push({ i, ids, ghost: true, pad: 1.1 });
-    });
+    if (conMiniaturas)
+      resultados.forEach((r, i) => {
+        const ids = ventanasDeResultado(r);
+        // vecindad: solo se dibuja el entorno cercano de esas ventanas (no todo el edificio)
+        if (ids.length) porTipo.push({ i, ids, ghost: true, pad: 1.1, vecindad: 2 });
+      });
     const total = generales.length + porTipo.length;
 
+    let t0 = performance.now();
     const g = await viewer.captureLote(generales, {
       width: 1200,
       height: 780,
       quality: 0.85,
       onProgress: (k) => onProgress(k, total),
     });
+    console.info(`[informe] vistas generales: ${g.length} en ${Math.round(performance.now() - t0)} ms`);
     imagenes.full = g[0];
     if (g[1]) imagenes.ventanas = g[1];
 
-    // miniaturas por tipo: 800×540 se ven bien ampliadas en el informe y siguen siendo ligeras (JPEG)
-    const t = await viewer.captureLote(porTipo, {
-      width: 800,
-      height: 540,
-      quality: 0.8,
-      onProgress: (k) => onProgress(generales.length + k, total),
-    });
-    porTipo.forEach((p, k) => (imagenes.porTipo[p.i] = t[k]));
+    if (porTipo.length) {
+      // tamaño adaptativo: con muchos tipos, miniaturas más pequeñas para acotar el tiempo total
+      const n = porTipo.length;
+      const [w, h] = n <= 30 ? [800, 540] : n <= 80 ? [640, 432] : [480, 324];
+      t0 = performance.now();
+      const t = await viewer.captureLote(porTipo, {
+        width: w,
+        height: h,
+        quality: 0.8,
+        onProgress: (k) => onProgress(generales.length + k, total),
+      });
+      console.info(
+        `[informe] miniaturas por tipo: ${n} (${w}×${h}) en ${Math.round(performance.now() - t0)} ms`
+      );
+      porTipo.forEach((p, k) => (imagenes.porTipo[p.i] = t[k]));
+    }
   } catch (e) {
     console.warn("No se pudieron capturar vistas 3D:", e);
   }
@@ -224,15 +237,31 @@ async function generarInforme() {
   if (w) {
     w.document.write(
       `<!doctype html><title>Informe de Ventanería NSR-10</title>
-       <body style="font-family:Segoe UI,Arial,sans-serif;color:#555;padding:40px">Generando informe…</body>`
+       <body style="font-family:Segoe UI,Arial,sans-serif;color:#555;padding:40px">
+       <h2 style="margin:0 0 8px;color:#0d5cab;font-size:18px">Generando informe…</h2>
+       <div id="prog">Preparando vistas 3D</div>
+       <div style="margin-top:14px;height:6px;background:#eee;border-radius:3px;overflow:hidden;max-width:420px"><div id="bar" style="height:100%;width:0;background:#0d5cab;transition:width .15s"></div></div>
+       </body>`
     );
     w.document.close();
   }
+  // Al abrirse el informe, esta pestaña queda oculta: el progreso se muestra en la ventana del informe.
+  const progreso = (k, n) => {
+    setStatus(`Generando vistas 3D para el informe… ${k}/${n}`, "load");
+    try {
+      if (w && !w.closed) {
+        const p = w.document.getElementById("prog");
+        const b = w.document.getElementById("bar");
+        if (p) p.textContent = `Vista 3D ${k} de ${n}`;
+        if (b) b.style.width = `${Math.round((k / n) * 100)}%`;
+      }
+    } catch (e) {
+      /* noop */
+    }
+  };
   try {
     setStatus("Generando vistas 3D para el informe…", "load");
-    const imagenes = await capturarVistas((k, n) =>
-      setStatus(`Generando vistas 3D para el informe… ${k}/${n}`, "load")
-    );
+    const imagenes = await capturarVistas(progreso);
     const html = generarHTML(resultados, leerParametros(), imagenes);
     if (w && !w.closed) {
       w.document.open();

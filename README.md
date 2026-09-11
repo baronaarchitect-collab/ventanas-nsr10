@@ -59,6 +59,11 @@ y abra `http://localhost:5174`.
 - El visor **solo renderiza cuando algo cambia** (cámara, selección, carga), no 60 veces por segundo.
 - La construcción del modelo se hace **por lotes** con indicador de progreso para no congelar la interfaz.
 - Las vistas del informe se capturan **en lote**, en JPEG y a pixel ratio 1 (antes PNG a 2×).
+  En las miniaturas por tipo solo se dibuja la **vecindad** de esas ventanas, no todo el edificio.
+- Al abrirse la ventana del informe la pestaña de la app queda oculta y Chrome limita sus
+  temporizadores a 1/s: la captura no cede el hilo ni usa `toBlob` en ese estado, y el progreso se
+  muestra en la propia ventana del informe.
+- La casilla **Miniaturas 3D por tipo** permite omitirlas para un informe casi instantáneo.
 - Librerías desde **jsdelivr** con `modulepreload` y precarga del `.wasm` de web-ifc.
 
 ## Lógica de cálculo (NSR-10 K.4)

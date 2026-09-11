@@ -422,64 +422,97 @@ export class IfcViewer {
       vis: this.allMeshes.map((m) => m.visible),
     };
 
+    // Suspende el bucle de animación: si no, cada cesión del hilo redibuja toda la escena.
+    this.capturing = true;
     this.renderer.setPixelRatio(1);
     this.renderer.setSize(width, height, false);
     this.camera.aspect = width / height;
 
     const ghost = this.ghostMat();
-    let enGhost = false;
-    const setGhostAll = () => {
+    const setAll = (visible, mat) => {
       for (const m of this.allMeshes) {
-        m.visible = true;
-        m.material = ghost;
-      }
-      enGhost = true;
-    };
-    const setBaseAll = () => {
-      for (const m of this.allMeshes) {
-        m.visible = true;
-        m.material = m.userData.baseMat;
-      }
-      enGhost = false;
-    };
-    const setBase = (ids) => {
-      for (const id of ids) {
-        const el = this.elementos.get(id);
-        if (el) for (const m of el.meshes) m.material = m.userData.baseMat;
-      }
-    };
-    const setGhost = (ids) => {
-      for (const id of ids) {
-        const el = this.elementos.get(id);
-        if (el) for (const m of el.meshes) m.material = ghost;
+        m.visible = visible;
+        m.material = mat ? mat : m.userData.baseMat;
       }
     };
 
+    /**
+     * Modo fantasma acotado: solo se dibujan (en fantasma) los elementos cuya caja toca la
+     * vecindad de los objetivos. En una vista cercana a una ventana eso descarta casi todo
+     * el edificio, que de otro modo se renderizaría entero detrás del vidrio en cada tipo.
+     */
+    const _exp = new THREE.Box3();
+    const _size = new THREE.Vector3();
+    const setGhostVecindad = (ids, box, vecindad) => {
+      const objetivo = new Set(ids);
+      let exp = null;
+      if (vecindad != null && !box.isEmpty()) {
+        box.getSize(_size);
+        const margen = Math.max(_size.x, _size.y, _size.z, 1) * vecindad + 1.5;
+        exp = _exp.copy(box).expandByScalar(margen);
+      }
+      for (const [id, el] of this.elementos) {
+        const esObjetivo = objetivo.has(id);
+        const visible = esObjetivo || !exp || el.bbox.intersectsBox(exp);
+        const mat = esObjetivo ? null : ghost;
+        for (const m of el.meshes) {
+          m.visible = visible;
+          m.material = mat ? mat : m.userData.baseMat;
+        }
+      }
+    };
+
+    // OJO: cuando la pestaña está oculta (p. ej. se abrió la ventana del informe encima),
+    // Chrome limita setTimeout y los callbacks de toBlob a UNO POR SEGUNDO. En ese caso
+    // no se cede el hilo ni se usa toBlob: todo síncrono, que en segundo plano corre a
+    // velocidad normal.
+    const visible = () => document.visibilityState === "visible";
+
+    // Codificación asíncrona (toBlob encola el JPEG fuera del hilo principal en Chrome)
+    const codificar = () =>
+      new Promise((resolve) => {
+        if (!canvas.toBlob || !visible()) return resolve(canvas.toDataURL(format, quality));
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) return resolve(canvas.toDataURL(format, quality));
+            const fr = new FileReader();
+            fr.onload = () => resolve(fr.result);
+            fr.onerror = () => resolve(canvas.toDataURL(format, quality));
+            fr.readAsDataURL(blob);
+          },
+          format,
+          quality
+        );
+      });
+
     const salida = [];
+    let ultimoYield = performance.now();
     try {
       for (let i = 0; i < grupos.length; i++) {
         const g = grupos[i];
         const vista = g.vista ?? "iso";
         const pad = g.pad ?? 1.4;
         if (!g.ids) {
-          if (enGhost) setBaseAll();
+          setAll(true, null);
           this.frameBox(this.boxModelo(), vista, pad);
-        } else if (g.ghost) {
-          if (!enGhost) setGhostAll();
-          setBase(g.ids);
-          this.frameObjects(g.ids, vista, pad);
         } else {
-          if (enGhost) setBaseAll();
-          this.isolate(g.ids);
-          this.frameObjects(g.ids, vista, pad);
+          const box = this.boxOf(g.ids);
+          if (g.ghost) setGhostVecindad(g.ids, box, g.vecindad);
+          else this.isolate(g.ids);
+          this.frameBox(box, vista, pad);
         }
         this.camera.updateProjectionMatrix();
         this.renderer.render(this.scene, this.camera);
-        salida.push(canvas.toDataURL(format, quality));
-        if (g.ids && g.ghost) setGhost(g.ids);
+        salida.push(codificar());
         onProgress(i + 1, grupos.length);
-        await yieldUI();
+        // ceder el hilo solo de vez en cuando (cada cesión cuesta ~1 frame) y solo si la
+        // pestaña está visible (oculta, cada setTimeout esperaría 1 s)
+        if (visible() && performance.now() - ultimoYield > 80) {
+          await yieldUI();
+          ultimoYield = performance.now();
+        }
       }
+      return await Promise.all(salida);
     } finally {
       // restaurar materiales (respetando selección), visibilidad, cámara y tamaño
       for (const m of this.allMeshes) {
@@ -494,9 +527,9 @@ export class IfcViewer {
       this.renderer.setPixelRatio(prev.pr);
       this.renderer.setSize(prev.w, prev.h, false);
       this.controls.update();
+      this.capturing = false;
       this.needsRender = true;
     }
-    return salida;
   }
 
   /** Compatibilidad: una sola vista (usa captureLote). */
@@ -506,8 +539,9 @@ export class IfcViewer {
   }
 
   ghostMat() {
+    // Sin iluminación: el fantasma es un velo al 12 %, no necesita PBR.
     if (!this._ghostMat)
-      this._ghostMat = new THREE.MeshStandardMaterial({
+      this._ghostMat = new THREE.MeshBasicMaterial({
         color: 0x8a939c,
         transparent: true,
         opacity: 0.12,
@@ -566,6 +600,7 @@ export class IfcViewer {
 
   animate() {
     requestAnimationFrame(this.animate);
+    if (this.capturing) return; // durante la captura del informe no se redibuja la vista
     const moved = this.controls.update();
     if (moved || this.needsRender) {
       this.needsRender = false;
